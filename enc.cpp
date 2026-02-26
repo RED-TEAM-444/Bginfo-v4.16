@@ -8,6 +8,10 @@
 #include <bcrypt.h>
 #include <stdint.h>
 
+#ifndef NT_SUCCESS
+#define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
+#endif
+
 // Minimal PEB definition for anti-debug (x64)
 typedef struct _PEB {
     BYTE  Reserved1[2];
@@ -151,4 +155,5 @@ int main()
     // Cleanup (rarely reached)
     VirtualFree(mem, 0, MEM_RELEASE);
     ExitProcess(0);
+
 }
