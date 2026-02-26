@@ -11,6 +11,19 @@
 
 // ==================== FIXES FOR MINGW =====================
 #ifndef NT_SUCCESS
+// MinGW-w64 often misses these NTSTATUS constants
+#ifndef STATUS_SUCCESS
+#define STATUS_SUCCESS          ((NTSTATUS)0x00000000L)
+#endif
+
+#ifndef STATUS_UNSUCCESSFUL
+#define STATUS_UNSUCCESSFUL     ((NTSTATUS)0xC0000001L)
+#endif
+
+// Optional but useful for better error reporting
+#ifndef STATUS_AUTH_TAG_MISMATCH
+#define STATUS_AUTH_TAG_MISMATCH ((NTSTATUS)0xC000042FL)
+#endif
 #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
 #endif
 
@@ -178,3 +191,4 @@ int main()
     printf("[+] Loader finished. Check your C2.\n");
     return 0;
 }
+
