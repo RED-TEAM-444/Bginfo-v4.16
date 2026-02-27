@@ -1,4 +1,4 @@
-#include <Windows.h>
+#include <windows.h>
 #include <stdio.h>
 #include <wincrypt.h>
 #pragma comment (lib, "crypt32.lib")
